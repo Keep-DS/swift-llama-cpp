@@ -119,6 +119,15 @@ final actor Llama {
         try initializeCompletion(text: formattedPrompt)
     }
 
+    /// Initialize a completion from an already-formatted prompt string, bypassing
+    /// the built-in chat template. Useful for models whose GGUF template uses
+    /// Jinja features (macros, etc.) that `llama_chat_apply_template` does not
+    /// support — in that case the template helper silently returns "" and the
+    /// caller should format the prompt itself.
+    func initializeCompletion(prompt: String) throws {
+        try initializeCompletion(text: prompt)
+    }
+
     private func initializeCompletion(text: String) throws {
         print("attempting to complete \"\(text)\"")
 

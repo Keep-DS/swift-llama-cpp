@@ -118,6 +118,30 @@ public final actor LlamaService {
         try await  llama.initializeCompletion(messages: messages)
         await llama.updateSamplingConfig(samplingConfig)
 
+        return makeStream(llama: llama)
+    }
+
+    /// Stream a completion from a caller-formatted prompt string. This bypasses
+    /// `llama_chat_apply_template`, which is broken for GGUF templates that use
+    /// Jinja macros (e.g. Gemma 4) — the built-in template applier returns a
+    /// negative error code for such templates and SwiftLlama's wrapper silently
+    /// produces an empty prompt, causing the sampler to crash on decode.
+    /// Callers that know the model's expected prompt format can use this
+    /// method to avoid that path entirely.
+    public func streamCompletion(prompt: String, samplingConfig: LlamaSamplingConfig) async throws -> AsyncThrowingStream<String, Error> {
+        guard !prompt.isEmpty else { throw LlamaError.emptyMessageArray }
+        let llama = try initializeLlamaIfNecessary()
+        await stopCompletion()
+        try await llama.initializeCompletion(prompt: prompt)
+        await llama.updateSamplingConfig(samplingConfig)
+
+        return makeStream(llama: llama)
+    }
+
+    /// Shared generation loop used by both chat-message and raw-prompt
+    /// `streamCompletion` entry points.
+    private func makeStream(llama: Llama) -> AsyncThrowingStream<String, Error> {
+
         return AsyncThrowingStream { continuation in
             currentTask = Task {
                 do {
