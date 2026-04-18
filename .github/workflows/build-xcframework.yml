@@ -1,0 +1,128 @@
+name: Build mtmd-enabled llama.xcframework
+
+on:
+  workflow_dispatch:
+    inputs:
+      llama_version:
+        description: 'llama.cpp release tag to build (e.g. b8816)'
+        required: true
+        default: 'b8816'
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - name: Set up Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Show toolchain versions
+        run: |
+          xcodebuild -version
+          cmake --version
+          xcrun --show-sdk-version --sdk iphoneos || true
+
+      - name: Clone llama.cpp at ${{ inputs.llama_version }}
+        run: |
+          git clone --depth 1 --branch "${{ inputs.llama_version }}" \
+            https://github.com/ggml-org/llama.cpp.git llama.cpp
+
+      - name: Patch build-xcframework.sh to include mtmd
+        working-directory: llama.cpp
+        run: |
+          set -euo pipefail
+          # 1. Enable tools so tools/mtmd gets built — that's where libmtmd.a comes from.
+          sed -i '' 's/^LLAMA_BUILD_TOOLS=OFF$/LLAMA_BUILD_TOOLS=ON/' build-xcframework.sh
+
+          # 2. Add mtmd public headers to every framework layout. The sed appends
+          #    two cp lines right after the existing gguf.h copy inside
+          #    setup_framework_structure. Anchor is `cp include/gguf.h` unique match.
+          awk '
+            /cp include\/gguf\.h         \$\{header_path\}/ && !p {
+              print
+              print "    cp tools/mtmd/mtmd.h         ${header_path}"
+              print "    cp tools/mtmd/mtmd-helper.h  ${header_path}"
+              p=1; next
+            }
+            { print }
+          ' build-xcframework.sh > build-xcframework.sh.new
+          mv build-xcframework.sh.new build-xcframework.sh
+          chmod +x build-xcframework.sh
+
+          # 3. Teach the modulemap about the new headers (same setup_framework_structure).
+          awk '
+            /header "gguf\.h"/ && !p {
+              print
+              print "    header \"mtmd.h\""
+              print "    header \"mtmd-helper.h\""
+              p=1; next
+            }
+            { print }
+          ' build-xcframework.sh > build-xcframework.sh.new
+          mv build-xcframework.sh.new build-xcframework.sh
+          chmod +x build-xcframework.sh
+
+          # 4. Add libmtmd.a to combine_static_libraries so the combined
+          #    framework binary contains mtmd symbols.
+          awk '
+            /"\$\{base_dir\}\/\$\{build_dir\}\/ggml\/src\/ggml-blas\/\$\{release_dir\}\/libggml-blas\.a"/ && !p {
+              print
+              print "        \"${base_dir}/${build_dir}/tools/mtmd/${release_dir}/libmtmd.a\""
+              p=1; next
+            }
+            { print }
+          ' build-xcframework.sh > build-xcframework.sh.new
+          mv build-xcframework.sh.new build-xcframework.sh
+          chmod +x build-xcframework.sh
+
+          echo "--- Confirming patches applied ---"
+          grep -n "LLAMA_BUILD_TOOLS=" build-xcframework.sh
+          grep -n "mtmd\.h\|libmtmd\.a" build-xcframework.sh || true
+
+      - name: Build the xcframework
+        working-directory: llama.cpp
+        env:
+          # Force the script not to log every compile line (it's quiet by default,
+          # but some CMake paths still emit a lot).
+          CMAKE_BUILD_PARALLEL_LEVEL: "0"
+        run: |
+          ./build-xcframework.sh
+
+      - name: Zip the xcframework
+        working-directory: llama.cpp
+        run: |
+          cd build-apple
+          # Match ggml-org's asset naming so downstream consumers see a
+          # familiar filename shape.
+          zip -r "llama-${{ inputs.llama_version }}-mtmd-xcframework.zip" llama.xcframework
+          ls -la
+
+      - name: Compute SHA-256 checksum
+        id: checksum
+        working-directory: llama.cpp/build-apple
+        run: |
+          CHECKSUM=$(shasum -a 256 "llama-${{ inputs.llama_version }}-mtmd-xcframework.zip" | awk '{print $1}')
+          echo "checksum=$CHECKSUM" >> "$GITHUB_OUTPUT"
+          echo "SHA-256: $CHECKSUM"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: llama.cpp/build-apple
+        run: |
+          TAG="${{ inputs.llama_version }}-mtmd"
+          # --clobber so re-running the workflow with the same inputs updates the asset.
+          gh release create "$TAG" \
+            "llama-${{ inputs.llama_version }}-mtmd-xcframework.zip" \
+            --repo "${{ github.repository }}" \
+            --title "llama.cpp ${{ inputs.llama_version }} with mtmd" \
+            --notes "Custom xcframework build of llama.cpp ${{ inputs.llama_version }} with LLAMA_BUILD_TOOLS=ON so libmtmd.a and its headers ship inside llama.framework. Multimodal APIs (mtmd_*, clip_*) are available alongside the usual llama_* surface.
+
+            SHA-256: \`${{ steps.checksum.outputs.checksum }}\`" \
+            --latest=false \
+          || gh release upload "$TAG" \
+               "llama-${{ inputs.llama_version }}-mtmd-xcframework.zip" \
+               --repo "${{ github.repository }}" \
+               --clobber
