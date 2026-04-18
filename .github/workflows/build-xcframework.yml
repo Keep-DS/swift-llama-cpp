@@ -40,11 +40,13 @@ jobs:
           # 1. Enable tools so tools/mtmd gets built — that's where libmtmd.a comes from.
           sed -i '' 's/^LLAMA_BUILD_TOOLS=OFF$/LLAMA_BUILD_TOOLS=ON/' build-xcframework.sh
 
-          # 2. Add mtmd public headers to every framework layout. The sed appends
+          # 2. Add mtmd public headers to every framework layout. The awk appends
           #    two cp lines right after the existing gguf.h copy inside
-          #    setup_framework_structure. Anchor is `cp include/gguf.h` unique match.
+          #    setup_framework_structure. Anchor on `gguf.h` with flexible
+          #    whitespace and allow either `include/gguf.h` or `ggml/include/gguf.h`
+          #    — the path moved to ggml/include in b8816.
           awk '
-            /cp include\/gguf\.h         \$\{header_path\}/ && !p {
+            /cp .*gguf\.h[[:space:]]+\$\{header_path\}/ && !p {
               print
               print "    cp tools/mtmd/mtmd.h         ${header_path}"
               print "    cp tools/mtmd/mtmd-helper.h  ${header_path}"
@@ -105,7 +107,25 @@ jobs:
 
           echo "--- Confirming patches applied ---"
           grep -n "LLAMA_BUILD_TOOLS=" build-xcframework.sh
-          grep -n "mtmd\.h\|libmtmd\.a" build-xcframework.sh || true
+          grep -n "mtmd\.h\|libmtmd\.a" build-xcframework.sh
+
+          # Fail fast if any of the four script patches silently missed their
+          # anchor. Each mtmd change should land in build-xcframework.sh.
+          required_patterns=(
+            '^LLAMA_BUILD_TOOLS=ON$'
+            'cp tools/mtmd/mtmd\.h '
+            'cp tools/mtmd/mtmd-helper\.h '
+            '^    header "mtmd\.h"$'
+            '^    header "mtmd-helper\.h"$'
+            'tools/mtmd/\$\{release_dir\}/libmtmd\.a'
+          )
+          for pat in "${required_patterns[@]}"; do
+            if ! grep -qE "$pat" build-xcframework.sh; then
+              echo "::error::Patch missing anchor: $pat"
+              exit 1
+            fi
+          done
+
           echo "--- tools/CMakeLists.txt ---"
           cat tools/CMakeLists.txt
           echo "--- tail of tools/mtmd/CMakeLists.txt ---"
