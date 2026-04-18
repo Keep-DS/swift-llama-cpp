@@ -8,7 +8,7 @@ let llamaVersion = "b8816"
 // LLAMA_BUILD_TOOLS=ON so libmtmd.a ships inside llama.framework alongside
 // libllama/libggml. This gives us the multimodal (clip + mtmd) APIs needed
 // for Gemma 4 vision input, which the stock ggml-org release strips out.
-let llamaChecksum = "2c2d586cf603ab7f5ac2ddf3c2cbcb93a971aeb54014e7311097b88487b5ecb5"
+let llamaChecksum = "0d6da4dc35cfe5b6320595c18be56ac0b5c5bc350bb9edd1151dd880e76dd328"
 
 let package = Package(
     name: "swift-llama-cpp",
