@@ -77,9 +77,35 @@ jobs:
           mv build-xcframework.sh.new build-xcframework.sh
           chmod +x build-xcframework.sh
 
+          # 5. Replace tools/CMakeLists.txt so only the mtmd subdirectory is
+          #    configured. With LLAMA_BUILD_TOOLS=ON the stock file also
+          #    enables batched-bench, tts, llama-bench, etc. — those define
+          #    MACOSX_BUNDLE executables whose install() lacks a BUNDLE
+          #    DESTINATION, which is fatal on iOS/visionOS/tvOS. We don't
+          #    need any of them.
+          printf '%s\n' \
+            'find_package(Threads REQUIRED)' \
+            'llama_add_compile_flags()' \
+            'add_subdirectory(mtmd)' > tools/CMakeLists.txt
+
+          # 6. Strip the CLI executables from tools/mtmd/CMakeLists.txt.
+          #    After `install(TARGETS mtmd LIBRARY PUBLIC_HEADER)` the file
+          #    defines llama-mtmd-cli / llama-mtmd-debug / deprecation
+          #    stubs — all MACOSX_BUNDLE exes that hit the same install
+          #    error on embedded platforms. We only need libmtmd.a.
+          awk '
+            { print }
+            /^install\(TARGETS mtmd LIBRARY PUBLIC_HEADER\)$/ { exit }
+          ' tools/mtmd/CMakeLists.txt > tools/mtmd/CMakeLists.txt.new
+          mv tools/mtmd/CMakeLists.txt.new tools/mtmd/CMakeLists.txt
+
           echo "--- Confirming patches applied ---"
           grep -n "LLAMA_BUILD_TOOLS=" build-xcframework.sh
           grep -n "mtmd\.h\|libmtmd\.a" build-xcframework.sh || true
+          echo "--- tools/CMakeLists.txt ---"
+          cat tools/CMakeLists.txt
+          echo "--- tail of tools/mtmd/CMakeLists.txt ---"
+          tail -10 tools/mtmd/CMakeLists.txt
 
       - name: Build the xcframework
         working-directory: llama.cpp
