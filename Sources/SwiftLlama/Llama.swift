@@ -11,6 +11,7 @@ final actor Llama {
     let context: LlamaContext
     private var batch: LlamaBatch
     private var sampler: LlamaSampler!
+    private var mtmd: LlamaMtmdContext?
 
     // Configuration
 
@@ -113,6 +114,71 @@ final actor Llama {
 
     /// Return the full processed token id sequence (prompt + generated).
     func getProcessedTokenIds() -> [llama_token] { processedTokens }
+
+    /// Load the multimodal projector for this model. Must be called at
+    /// most once per `Llama` instance; subsequent calls replace the prior
+    /// context. Throws `LlamaMtmdError.initializationFailed` if the
+    /// projector file is invalid for the loaded model.
+    func loadMmproj(at url: URL) throws {
+        let path = url.path(percentEncoded: false)
+        guard let ctx = LlamaMtmdContext(mmprojPath: path, model: model, useGPU: config.useGPU) else {
+            throw LlamaMtmdError.initializationFailed
+        }
+        self.mtmd = ctx
+    }
+
+    var hasMtmd: Bool { mtmd != nil }
+
+    /// Initialize a multimodal completion. The prompt should contain one
+    /// `LlamaMtmdContext.defaultMarker` ("<__media__>") per image.
+    /// Images are passed as encoded bytes (jpg/png/etc).
+    ///
+    /// After this returns, `currentTokenPosition` and the KV cache are
+    /// positioned for sampling the next token. The token-prefix cache
+    /// optimization used by `initializeCompletion(text:)` is bypassed —
+    /// multimodal turns always re-process from position 0.
+    func initializeMultimodalCompletion(prompt: String, images: [Data]) throws {
+        guard let mtmd else { throw LlamaMtmdError.initializationFailed }
+
+        var bitmaps: [LlamaBitmap] = []
+        bitmaps.reserveCapacity(images.count)
+        for data in images {
+            guard let bitmap = LlamaBitmap.decode(data: data, in: mtmd) else {
+                throw LlamaMtmdError.bitmapDecodeFailed
+            }
+            bitmaps.append(bitmap)
+        }
+
+        let chunks = try mtmd.tokenize(
+            text: prompt,
+            addSpecial: model.shouldAddBos(),
+            parseSpecial: true,
+            bitmaps: bitmaps
+        )
+
+        // The KV cache may hold a prior turn; mtmd has no equivalent of
+        // the text-only prefix-match optimization (image chunks aren't
+        // comparable token-for-token across turns), so start fresh.
+        clear()
+
+        let newNPast = try mtmd.evalChunks(
+            chunks,
+            into: context,
+            nPast: 0,
+            seqId: 0,
+            nBatch: Int32(config.batchSize),
+            logitsLast: true
+        )
+
+        currentTokenPosition = newNPast
+        // We don't track per-token ids for the multimodal path because
+        // image chunks don't have llama-vocab tokens we could store. This
+        // means a subsequent text-only `initializeCompletion(text:)` call
+        // will fall through the prefix-match check and full-reprocess —
+        // which is correct (it has no way to know what the image stood
+        // for) and matches the conservative "clear on switch" policy.
+        processedTokens = []
+    }
 
     func initializeCompletion(messages: [LlamaChatMessage], addAssistant: Bool? = nil) throws {
         let formattedPrompt = model.applyChatTemplate(to: messages, addAssistant: addAssistant)

@@ -13,12 +13,25 @@ public final actor LlamaService {
     private var llama: Llama?
     private var currentTask: Task<(), Error>?
     private let modelUrl: URL
+    private let mmprojUrl: URL?
     private let config: LlamaConfig
 
     // MARK: Lifecycle
 
     public init(modelUrl: URL, config: LlamaConfig) {
         self.modelUrl = modelUrl
+        self.mmprojUrl = nil
+        self.config = config
+    }
+
+    /// Initialize with an optional multimodal projector (mmproj) GGUF
+    /// alongside the text model. When `mmprojUrl` is non-nil the projector
+    /// is loaded lazily on the first call to `streamCompletion(prompt:images:...)`.
+    /// Text-only `streamCompletion` calls work the same whether or not
+    /// `mmprojUrl` was supplied.
+    public init(modelUrl: URL, mmprojUrl: URL?, config: LlamaConfig) {
+        self.modelUrl = modelUrl
+        self.mmprojUrl = mmprojUrl
         self.config = config
     }
 
@@ -133,6 +146,33 @@ public final actor LlamaService {
         let llama = try initializeLlamaIfNecessary()
         await stopCompletion()
         try await llama.initializeCompletion(prompt: prompt)
+        await llama.updateSamplingConfig(samplingConfig)
+
+        return makeStream(llama: llama)
+    }
+
+    /// Stream a completion from a caller-formatted prompt that includes
+    /// one `LlamaMtmdContext.defaultMarker` per supplied image. The
+    /// service must have been initialized with an `mmprojUrl`; otherwise
+    /// `LlamaMtmdError.initializationFailed` is thrown.
+    ///
+    /// Image bytes are the encoded file contents (JPEG, PNG, BMP, GIF,
+    /// or WebP — anything mtmd's stb_image-backed decoder handles).
+    /// Passing an empty `images` array makes this equivalent to the
+    /// text-only `streamCompletion(prompt:samplingConfig:)`.
+    public func streamCompletion(prompt: String, images: [Data], samplingConfig: LlamaSamplingConfig) async throws -> AsyncThrowingStream<String, Error> {
+        guard !prompt.isEmpty else { throw LlamaError.emptyMessageArray }
+        if images.isEmpty {
+            return try await streamCompletion(prompt: prompt, samplingConfig: samplingConfig)
+        }
+        guard let mmprojUrl else { throw LlamaMtmdError.initializationFailed }
+
+        let llama = try initializeLlamaIfNecessary()
+        await stopCompletion()
+        if await !llama.hasMtmd {
+            try await llama.loadMmproj(at: mmprojUrl)
+        }
+        try await llama.initializeMultimodalCompletion(prompt: prompt, images: images)
         await llama.updateSamplingConfig(samplingConfig)
 
         return makeStream(llama: llama)
