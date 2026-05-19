@@ -72,21 +72,28 @@ public final class LlamaMtmdContext {
         // `UnsafeMutablePointer<OpaquePointer?>?` (the C signature is
         // `const mtmd_bitmap **`; const-on-pointee doesn't survive the
         // forward-struct import). Pass a mutable copy.
+        //
+        // The outer `withExtendedLifetime(bitmaps)` is load-bearing: it
+        // pins the `[LlamaBitmap]` array across the C call so ARC can't
+        // optimistically release the wrapper objects (and free their
+        // underlying mtmd_bitmap pointers) before tokenize is done
+        // reading their pixel data. A trailing `withExtendedLifetime`
+        // after the C call would be a no-op — the C call has already
+        // returned and the lifetime extension would not apply.
         var bitmapPointers: [OpaquePointer?] = bitmaps.map { $0.pointer }
 
-        let rc: Int32 = text.withCString { cText -> Int32 in
-            var input = mtmd_input_text(
-                text: cText,
-                add_special: addSpecial,
-                parse_special: parseSpecial
-            )
-            return bitmapPointers.withUnsafeMutableBufferPointer { buf in
-                mtmd_tokenize(pointer, chunks.pointer, &input, buf.baseAddress, buf.count)
+        let rc: Int32 = withExtendedLifetime(bitmaps) {
+            text.withCString { cText -> Int32 in
+                var input = mtmd_input_text(
+                    text: cText,
+                    add_special: addSpecial,
+                    parse_special: parseSpecial
+                )
+                return bitmapPointers.withUnsafeMutableBufferPointer { buf in
+                    mtmd_tokenize(pointer, chunks.pointer, &input, buf.baseAddress, buf.count)
+                }
             }
         }
-        // Keep `bitmaps` alive across the C call so ARC doesn't free a
-        // LlamaBitmap whose pointer is still live in bitmapPointers.
-        withExtendedLifetime(bitmaps) {}
 
         switch rc {
         case 0: return chunks

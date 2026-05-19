@@ -115,11 +115,12 @@ final actor Llama {
     /// Return the full processed token id sequence (prompt + generated).
     func getProcessedTokenIds() -> [llama_token] { processedTokens }
 
-    /// Load the multimodal projector for this model. Must be called at
-    /// most once per `Llama` instance; subsequent calls replace the prior
-    /// context. Throws `LlamaMtmdError.initializationFailed` if the
-    /// projector file is invalid for the loaded model.
+    /// Load the multimodal projector for this model. Idempotent — if
+    /// already loaded, returns immediately without reloading. Throws
+    /// `LlamaMtmdError.initializationFailed` if the projector file is
+    /// invalid for the loaded model.
     func loadMmproj(at url: URL) throws {
+        if mtmd != nil { return }
         let path = url.path(percentEncoded: false)
         guard let ctx = LlamaMtmdContext(mmprojPath: path, model: model, useGPU: config.useGPU) else {
             throw LlamaMtmdError.initializationFailed

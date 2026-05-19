@@ -169,9 +169,9 @@ public final actor LlamaService {
 
         let llama = try initializeLlamaIfNecessary()
         await stopCompletion()
-        if await !llama.hasMtmd {
-            try await llama.loadMmproj(at: mmprojUrl)
-        }
+        // `loadMmproj` is idempotent — the actor-isolated check inside
+        // means concurrent callers can't race a double-load.
+        try await llama.loadMmproj(at: mmprojUrl)
         try await llama.initializeMultimodalCompletion(prompt: prompt, images: images)
         await llama.updateSamplingConfig(samplingConfig)
 
