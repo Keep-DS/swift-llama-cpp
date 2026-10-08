@@ -20,6 +20,12 @@ final actor Llama {
     /// Tracks the current position in the token sequence during decoding.
     var currentTokenPosition: Int32 = 0
     var processedTokens: [llama_token] = []
+    /// On-disk prefix snapshots (nil when the config names no directory).
+    private let promptCache: LlamaPromptCache?
+    /// Sliding-window size of the model's SWA layers (0 when it has none).
+    private let swaWindow: Int
+    /// The warm-up decode has run (or a real decode has paged the weights in).
+    private var weightsWarmed = false
 
     init(modelPath: String, config: LlamaConfig) throws {
         self.config = config
@@ -82,6 +88,26 @@ final actor Llama {
         self.model = context.model
         self.context = context
         self.batch = .init(initialSize: Int32(config.batchSize))
+        self.swaWindow = Int(max(0, llama_model_n_swa(model.modelPointer)))
+
+        if let directory = config.promptCacheDirectory {
+            // Everything that changes the KV layout or contents is part of
+            // the identity, so a snapshot only ever restores into the model
+            // and context it was made with.
+            let attributes = try? FileManager.default.attributesOfItem(atPath: modelPath)
+            let fileSize = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
+            let identity = [
+                URL(fileURLWithPath: modelPath).lastPathComponent,
+                String(fileSize),
+                "ctx=\(contextParam.n_ctx)",
+                "batch=\(config.batchSize)",
+                "gpu=\(config.useGPU && !forceCPUOnlyPath)",
+                "v1"
+            ].joined(separator: "|")
+            self.promptCache = LlamaPromptCache(directory: directory, maxFiles: config.promptCacheMaxFiles, identity: identity)
+        } else {
+            self.promptCache = nil
+        }
     }
 
     deinit {
@@ -195,7 +221,44 @@ final actor Llama {
         try initializeCompletion(text: prompt)
     }
 
-    private func initializeCompletion(text: String) throws {
+    /// Like `initializeCompletion(prompt:)`, with `cacheablePrefix` naming the
+    /// leading part of `prompt` that stays the same across turns (system
+    /// prompt + tool declarations). When the KV cache can't simply be extended
+    /// or trimmed, that prefix is restored from its on-disk snapshot (or
+    /// processed once and saved) instead of being re-processed.
+    func initializeCompletion(prompt: String, cacheablePrefix: String?) throws {
+        try initializeCompletion(text: prompt, cacheablePrefix: cacheablePrefix)
+    }
+
+    /// Page the model in before the first real prompt: a one-token decode in
+    /// warm-up mode touches every weight and builds the GPU pipelines, then
+    /// the newest prefix snapshot (if any) is restored, so the next prompt
+    /// that starts with it only processes what follows. Does nothing while
+    /// the KV cache is in use.
+    func warmUp() throws {
+        guard processedTokens.isEmpty else {
+            weightsWarmed = true
+            return
+        }
+        if !weightsWarmed {
+            let start = CFAbsoluteTimeGetCurrent()
+            batch.reset()
+            batch.addToken(model.bosToken(), at: 0, logits: true)
+            context.setWarmup(true)
+            defer {
+                context.setWarmup(false)
+                clear()
+            }
+            try context.decode(batch: batch)
+            weightsWarmed = true
+            print("### Warm-up decode: \(Int((CFAbsoluteTimeGetCurrent() - start) * 1000))ms")
+        }
+        if processedTokens.isEmpty, let url = promptCache?.newestSnapshotURL() {
+            _ = restoreSnapshot(at: url, expecting: nil)
+        }
+    }
+
+    private func initializeCompletion(text: String, cacheablePrefix: String? = nil) throws {
         print("attempting to complete \"\(text)\"")
 
         let tokenList = model.tokenize(text: text, addBos: model.shouldAddBos(), special: true)
@@ -203,66 +266,98 @@ final actor Llama {
             throw LlamaError.contextSizeLimitExeeded
         }
 
-        if tokenList.starts(with: processedTokens) {
+        // The prefix only counts when the prompt really starts with it
+        // token-for-token and something follows it.
+        var prefixTokens: [llama_token]?
+        if promptCache != nil, let cacheablePrefix, !cacheablePrefix.isEmpty {
+            let candidate = model.tokenize(text: cacheablePrefix, addBos: model.shouldAddBos(), special: true)
+            if candidate.count >= LlamaKVReuse.minimumSnapshotTokens,
+               candidate.count < tokenList.count,
+               tokenList.starts(with: candidate) {
+                prefixTokens = candidate
+            }
+        }
+
+        let plan = LlamaKVReuse.plan(
+            prompt: tokenList,
+            processed: processedTokens,
+            prefixCount: prefixTokens?.count,
+            swaWindow: swaWindow,
+            minResidentPosition: Int(context.memory.minPosition(for: 0))
+        )
+
+        switch plan {
+        case .extend:
             print("### Using cached processing")
             try processPrompt(tokens: Array(tokenList[processedTokens.count...]), startIndex: processedTokens.count)
-        } else {
-            // Check if we can optimize by only clearing from the divergence point
-            let divergenceIndex = findDivergenceIndex(newTokenList: tokenList, processedTokens: processedTokens)
-            
-            if divergenceIndex > 0 && shouldUsePartialOptimization(divergenceIndex: divergenceIndex, totalProcessed: processedTokens.count) {
-                print("### Using partial optimization from position \(divergenceIndex)")
-                do {
-                    try optimizedReprocessing(newTokenList: tokenList, divergenceIndex: divergenceIndex)
-                } catch {
-                    print("Partial optimization failed, falling back to full reprocessing")
-                    clear()
-                    try processPrompt(tokens: tokenList, startIndex: 0)
-                }
+        case .trim(let position):
+            print("### Trimming cache back to position \(position)")
+            if context.memory.remove(sequenceId: 0, from: Int32(position), to: -1) {
+                processedTokens = Array(processedTokens[..<position])
+                currentTokenPosition = Int32(position)
+                try processPrompt(tokens: Array(tokenList[position...]), startIndex: position)
             } else {
-                print("### Full reprocessing required")
+                print("### Trim refused by the cache, full reprocessing")
                 clear()
                 try processPrompt(tokens: tokenList, startIndex: 0)
             }
+        case .restorePrefix:
+            if let prefixTokens {
+                try loadOrBuildPrefix(prefixTokens)
+                try processPrompt(tokens: Array(tokenList[prefixTokens.count...]), startIndex: prefixTokens.count)
+            } else {
+                clear()
+                try processPrompt(tokens: tokenList, startIndex: 0)
+            }
+        case .full:
+            print("### Full reprocessing required")
+            clear()
+            try processPrompt(tokens: tokenList, startIndex: 0)
         }
+        weightsWarmed = true
     }
 
-    /// Find the index where the two token lists diverge
-    private func findDivergenceIndex(newTokenList: [llama_token], processedTokens: [llama_token]) -> Int {
-        let minLength = min(newTokenList.count, processedTokens.count)
-        for i in 0..<minLength {
-            if newTokenList[i] != processedTokens[i] {
-                return i
-            }
+    /// Make the KV cache hold exactly `prefix`: restore its snapshot, or
+    /// process it and save one for next time.
+    private func loadOrBuildPrefix(_ prefix: [llama_token]) throws {
+        guard let promptCache else {
+            clear()
+            try processPrompt(tokens: prefix, startIndex: 0)
+            return
         }
-        return minLength
+        let url = promptCache.url(for: prefix)
+        if restoreSnapshot(at: url, expecting: prefix) { return }
+
+        clear()
+        let start = CFAbsoluteTimeGetCurrent()
+        try processPrompt(tokens: prefix, startIndex: 0)
+        let processedMs = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
+        let saveStart = CFAbsoluteTimeGetCurrent()
+        let bytes = promptCache.save(tokens: prefix, from: context, to: url)
+        print("### Prefix processed: \(prefix.count) tokens in \(processedMs)ms; snapshot \(bytes / 1_000_000)MB saved in \(Int((CFAbsoluteTimeGetCurrent() - saveStart) * 1000))ms")
     }
-    
-    /// Decide whether to use partial optimization based on the divergence point
-    private func shouldUsePartialOptimization(divergenceIndex: Int, totalProcessed: Int) -> Bool {
-        // Only use partial optimization if:
-        // 1. We have a significant amount of processed tokens (at least 10)
-        // 2. The divergence is not too early (at least 50% of tokens match)
-        // 3. The divergence is not at the very beginning
-        
-        guard divergenceIndex > 0 && totalProcessed >= 10 else { return false }
-        
-        let matchPercentage = Double(divergenceIndex) / Double(totalProcessed)
-        return matchPercentage >= 0.5 // At least 50% of tokens match
-    }
-    
-    /// Optimized reprocessing that only clears cache from the divergence point
-    private func optimizedReprocessing(newTokenList: [llama_token], divergenceIndex: Int) throws {
-        // Clear KV cache from the divergence point onward
-        context.clearKVCacheFromPosition(Int32(divergenceIndex))
-        
-        // Update our internal state
-        processedTokens = Array(processedTokens[0..<divergenceIndex])
-        currentTokenPosition = Int32(divergenceIndex)
-        
-        // Process only the tokens from the divergence point onward
-        let tokensToProcess = Array(newTokenList[divergenceIndex...])
-        try processPrompt(tokens: tokensToProcess, startIndex: divergenceIndex)
+
+    /// Restore a prefix snapshot into sequence 0. On any failure (missing,
+    /// unreadable, or not the expected tokens) the cache is left empty, the
+    /// bad file is removed, and false is returned.
+    private func restoreSnapshot(at url: URL, expecting expected: [llama_token]?) -> Bool {
+        guard let promptCache, FileManager.default.fileExists(atPath: url.path) else { return false }
+        let start = CFAbsoluteTimeGetCurrent()
+        clear()
+        guard let loaded = context.loadSequenceState(from: url.path, destSeqId: 0, capacity: Int(maxTokenCount)),
+              loaded.count > 0,
+              loaded.count < Int(maxTokenCount) - 4,
+              expected == nil || loaded.tokens == expected! else {
+            print("### Prefix snapshot unusable, removing it")
+            clear()
+            promptCache.remove(url)
+            return false
+        }
+        processedTokens = loaded.tokens
+        currentTokenPosition = Int32(loaded.count)
+        promptCache.touch(url)
+        print("### Prefix restored: \(loaded.count) tokens in \(Int((CFAbsoluteTimeGetCurrent() - start) * 1000))ms")
+        return true
     }
 
     func generateNextToken() throws -> NextToken {
@@ -309,21 +404,26 @@ final actor Llama {
         guard !tokens.isEmpty else { return }
         batch.reset()
 
-        for i in 0..<tokens.count {
-            let tokenPosition = startIndex + i
-            let tokenId = tokens[i]
-            batch.addToken(tokenId, at: Int32(tokenPosition), logits: false)
-            processedTokens.append(tokenId)
-            if batch.size == config.batchSize {
-                try processBatch()
-                batch.reset()
+        do {
+            // Decode each full batch, and the final partial one with logits
+            // on its last token. (The old loop decoded a full final batch,
+            // reset it, then flagged logits on the EMPTY batch: index -1, and
+            // an empty decode, whenever the prompt was an exact batch multiple.)
+            for i in 0..<tokens.count {
+                let isLast = i == tokens.count - 1
+                batch.addToken(tokens[i], at: Int32(startIndex + i), logits: isLast)
+                processedTokens.append(tokens[i])
+                if isLast || batch.size == config.batchSize {
+                    try processBatch()
+                    batch.reset()
+                }
             }
+        } catch {
+            // A failed decode leaves the cache partly written: start clean.
+            clear()
+            throw error
         }
 
-        batch.setLastTokenLogits(true)
-        try processBatch()
-
         currentTokenPosition = Int32(processedTokens.count)
-
     }
 }

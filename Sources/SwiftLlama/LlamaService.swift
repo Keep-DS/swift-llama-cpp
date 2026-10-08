@@ -142,13 +142,36 @@ public final actor LlamaService {
     /// Callers that know the model's expected prompt format can use this
     /// method to avoid that path entirely.
     public func streamCompletion(prompt: String, samplingConfig: LlamaSamplingConfig) async throws -> AsyncThrowingStream<String, Error> {
+        try await streamCompletion(prompt: prompt, cacheablePrefix: nil, images: [], samplingConfig: samplingConfig)
+    }
+
+    /// Stream a completion from a caller-formatted prompt whose leading
+    /// `cacheablePrefix` (e.g. the system turn with tool declarations) stays
+    /// the same across turns. With `LlamaConfig.promptCacheDirectory` set,
+    /// that prefix's KV state is saved to disk the first time it's processed
+    /// and restored afterwards (after a reload, or when the rest of the prompt
+    /// changed), instead of being re-processed. A prefix the prompt doesn't
+    /// start with is ignored. Image turns always process from the start.
+    public func streamCompletion(prompt: String, cacheablePrefix: String?, images: [Data], samplingConfig: LlamaSamplingConfig) async throws -> AsyncThrowingStream<String, Error> {
         guard !prompt.isEmpty else { throw LlamaError.emptyMessageArray }
+        if !images.isEmpty {
+            return try await streamCompletion(prompt: prompt, images: images, samplingConfig: samplingConfig)
+        }
         let llama = try initializeLlamaIfNecessary()
         await stopCompletion()
-        try await llama.initializeCompletion(prompt: prompt)
+        try await llama.initializeCompletion(prompt: prompt, cacheablePrefix: cacheablePrefix)
         await llama.updateSamplingConfig(samplingConfig)
 
         return makeStream(llama: llama)
+    }
+
+    /// Load the model now instead of on the first completion, page its
+    /// weights in, and restore the newest prompt-prefix snapshot, so the next
+    /// completion starts quickly. Safe to call repeatedly; a no-op while a
+    /// completion holds the KV cache.
+    public func warmUp() async throws {
+        let llama = try initializeLlamaIfNecessary()
+        try await llama.warmUp()
     }
 
     /// Stream a completion from a caller-formatted prompt that includes
