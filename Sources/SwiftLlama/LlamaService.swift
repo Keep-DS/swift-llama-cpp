@@ -179,8 +179,8 @@ public final actor LlamaService {
     /// service must have been initialized with an `mmprojUrl`; otherwise
     /// `LlamaMtmdError.initializationFailed` is thrown.
     ///
-    /// Image bytes are the encoded file contents (JPEG, PNG, BMP, GIF,
-    /// or WebP — anything mtmd's stb_image-backed decoder handles).
+    /// Image bytes are the encoded file contents (JPEG, PNG, BMP or GIF:
+    /// anything mtmd's stb_image-backed decoder handles; not WebP or HEIC).
     /// Passing an empty `images` array makes this equivalent to the
     /// text-only `streamCompletion(prompt:samplingConfig:)`.
     public func streamCompletion(prompt: String, images: [Data], samplingConfig: LlamaSamplingConfig) async throws -> AsyncThrowingStream<String, Error> {

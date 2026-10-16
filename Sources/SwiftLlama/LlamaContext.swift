@@ -158,6 +158,10 @@ public final class LlamaContext {
 
     public func setEmbeddingsOutput(_ enabled: Bool) { llama_set_embeddings(contextPointer, enabled) }
     public func setCausalAttention(_ enabled: Bool) { llama_set_causal_attn(contextPointer, enabled) }
+    /// Deprecated upstream (llama.cpp v0.7.0): warm-up mode only changes the
+    /// graph for MoE models (all experts active) and is slated for removal.
+    /// Run a plain decode instead, as `Llama.warmUp()` does.
+    @available(*, deprecated, message: "Do a plain warm-up decode instead (llama_set_warmup is deprecated upstream)")
     public func setWarmup(_ enabled: Bool) { llama_set_warmup(contextPointer, enabled) }
 
     // Abort callback bridging

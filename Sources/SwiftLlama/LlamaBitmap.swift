@@ -2,7 +2,8 @@ import Foundation
 import llama
 
 /// RAII wrapper around `mtmd_bitmap`. Holds an encoded-image byte buffer
-/// (jpg/png/bmp/gif/webp — anything stb_image handles) that mtmd will
+/// (jpg/png/bmp/gif — anything stb_image handles; webp needs mtmd's
+/// ffmpeg video path, which the Apple builds leave out) that mtmd will
 /// decode internally when the bitmap is constructed.
 ///
 /// The underlying mtmd_bitmap is heap-allocated in C and must be freed by
@@ -33,7 +34,19 @@ public final class LlamaBitmap {
     public static func decode(data: Data, in mtmdContext: LlamaMtmdContext) -> LlamaBitmap? {
         let p: OpaquePointer? = data.withUnsafeBytes { raw -> OpaquePointer? in
             guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return nil }
-            return mtmd_helper_bitmap_init_from_buf(mtmdContext.pointer, base, raw.count)
+            // Since llama.cpp v0.7.0 the helper returns a bitmap + video
+            // context pair. A video context only appears for video input
+            // (never built into the iOS slices: MTMD_VIDEO=OFF); free one if
+            // it ever does and refuse it, since this wrapper takes stills.
+            let wrapper = mtmd_helper_bitmap_init_from_buf(
+                mtmdContext.pointer, base, raw.count,
+                false, mtmd_helper_init_opt_default())
+            if let video = wrapper.video_ctx {
+                if let bitmap = wrapper.bitmap { mtmd_bitmap_free(bitmap) }
+                mtmd_helper_video_free(video)
+                return nil
+            }
+            return wrapper.bitmap
         }
         guard let p else { return nil }
         return LlamaBitmap(pointer: p)

@@ -3,12 +3,16 @@
 
 import PackageDescription
 
-let llamaVersion = "b8816"
+// llama.cpp v0.7.0 (stable, 2026-10-15) is the same commit as build tag
+// b11669 (620d222); the build tag names the release asset.
+let llamaVersion = "b11669"
 // Custom xcframework built by .github/workflows/build-xcframework.yml with
-// LLAMA_BUILD_TOOLS=ON so libmtmd.a ships inside llama.framework alongside
-// libllama/libggml. This gives us the multimodal (clip + mtmd) APIs needed
-// for Gemma 4 vision input, which the stock ggml-org release strips out.
-let llamaChecksum = "0d6da4dc35cfe5b6320595c18be56ac0b5c5bc350bb9edd1151dd880e76dd328"
+// llama.cpp's own build-xcframework.sh (iOS device + iOS Simulator + macOS).
+// Upstream now builds mtmd (multimodal, for Gemma 4 vision) into the
+// framework itself, so the old header/CMake patches are gone; we still host
+// our own build because ggml-org's release ships only iOS device + macOS
+// slices, and the app's unit tests run on the iOS Simulator.
+let llamaChecksum = "ed953f4077b5fdf8bf84d306cd1509edba6b1fdfe816e376bae5c6242abe9c9d"
 
 let package = Package(
     name: "swift-llama-cpp",

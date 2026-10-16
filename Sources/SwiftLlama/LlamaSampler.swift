@@ -50,7 +50,10 @@ public final class LlamaSampler {
         llama_sampler_chain_add(samplerPointer, topPSampler)
 
         if let penaltyConfig = config.repetitionPenaltyConfig, penaltyConfig.lastN > 0 {
+            // llama.cpp v0.7.0 sizes the penalty counters by vocabulary up
+            // front (new leading n_vocab argument); behaviour is unchanged.
             let penaltiesSampler = llama_sampler_init_penalties(
+                model.vocabularySize(),
                 penaltyConfig.lastN,
                 penaltyConfig.repeatPenalty,
                 penaltyConfig.freqPenalty,

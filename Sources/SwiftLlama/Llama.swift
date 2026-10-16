@@ -49,6 +49,11 @@ final actor Llama {
             #endif
         }()
 
+        // Memory-map the weights (llama.cpp's AUTO resolves to this on Apple
+        // GPUs too, but say so): mapped pages stay clean and evictable, which
+        // the app's iOS memory budget depends on.
+        model_params.load_mode = LLAMA_LOAD_MODE_MMAP
+
         let model = LlamaModel(path: modelPath, parameters: model_params)
         guard let model else {
             print("Could not load model at \(modelPath)")
@@ -102,7 +107,10 @@ final actor Llama {
                 "ctx=\(contextParam.n_ctx)",
                 "batch=\(config.batchSize)",
                 "gpu=\(config.useGPU && !forceCPUOnlyPath)",
-                "v1"
+                // The engine's state-file format: snapshots written by an
+                // older llama.cpp are never offered to a newer one.
+                "state=\(LLAMA_STATE_SEQ_VERSION)",
+                "v2"
             ].joined(separator: "|")
             self.promptCache = LlamaPromptCache(directory: directory, maxFiles: config.promptCacheMaxFiles, identity: identity)
         } else {
@@ -230,11 +238,12 @@ final actor Llama {
         try initializeCompletion(text: prompt, cacheablePrefix: cacheablePrefix)
     }
 
-    /// Page the model in before the first real prompt: a one-token decode in
-    /// warm-up mode touches every weight and builds the GPU pipelines, then
+    /// Page the model in before the first real prompt: a one-token decode
+    /// touches every layer's weights and builds the GPU pipelines, then
     /// the newest prefix snapshot (if any) is restored, so the next prompt
     /// that starts with it only processes what follows. Does nothing while
-    /// the KV cache is in use.
+    /// the KV cache is in use. (A plain decode: llama.cpp's warm-up mode is
+    /// deprecated upstream and only ever differed for MoE models.)
     func warmUp() throws {
         guard processedTokens.isEmpty else {
             weightsWarmed = true
@@ -244,11 +253,7 @@ final actor Llama {
             let start = CFAbsoluteTimeGetCurrent()
             batch.reset()
             batch.addToken(model.bosToken(), at: 0, logits: true)
-            context.setWarmup(true)
-            defer {
-                context.setWarmup(false)
-                clear()
-            }
+            defer { clear() }
             try context.decode(batch: batch)
             weightsWarmed = true
             print("### Warm-up decode: \(Int((CFAbsoluteTimeGetCurrent() - start) * 1000))ms")

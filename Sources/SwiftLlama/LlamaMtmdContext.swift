@@ -69,9 +69,9 @@ public final class LlamaMtmdContext {
         let chunks = LlamaInputChunks()
 
         // mtmd_tokenize takes the bitmap pointer array as
-        // `UnsafeMutablePointer<OpaquePointer?>?` (the C signature is
-        // `const mtmd_bitmap **`; const-on-pointee doesn't survive the
-        // forward-struct import). Pass a mutable copy.
+        // `UnsafePointer<OpaquePointer?>?` (the C signature is
+        // `const mtmd_bitmap * const *`; const-on-pointee doesn't survive
+        // the forward-struct import).
         //
         // The outer `withExtendedLifetime(bitmaps)` is load-bearing: it
         // pins the `[LlamaBitmap]` array across the C call so ARC can't
@@ -80,16 +80,20 @@ public final class LlamaMtmdContext {
         // reading their pixel data. A trailing `withExtendedLifetime`
         // after the C call would be a no-op — the C call has already
         // returned and the lifetime extension would not apply.
-        var bitmapPointers: [OpaquePointer?] = bitmaps.map { $0.pointer }
+        let bitmapPointers: [OpaquePointer?] = bitmaps.map { $0.pointer }
 
         let rc: Int32 = withExtendedLifetime(bitmaps) {
             text.withCString { cText -> Int32 in
+                // `text_len` is the UTF-8 byte count: since llama.cpp v0.7.0
+                // mtmd reads exactly that many bytes (0 would be an empty
+                // prompt), so it must match what withCString hands over.
                 var input = mtmd_input_text(
                     text: cText,
+                    text_len: text.utf8.count,
                     add_special: addSpecial,
                     parse_special: parseSpecial
                 )
-                return bitmapPointers.withUnsafeMutableBufferPointer { buf in
+                return bitmapPointers.withUnsafeBufferPointer { buf in
                     mtmd_tokenize(pointer, chunks.pointer, &input, buf.baseAddress, buf.count)
                 }
             }

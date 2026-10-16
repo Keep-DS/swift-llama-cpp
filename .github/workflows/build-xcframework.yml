@@ -1,12 +1,24 @@
-name: Build mtmd-enabled llama.xcframework
+name: Build llama.xcframework (iOS device + simulator + macOS)
+
+# Builds llama.cpp's own build-xcframework.sh at a release tag and publishes
+# the zip as a release asset of this repo, named the way Package.swift
+# expects (`<tag>-mtmd/llama-<tag>-mtmd-xcframework.zip`).
+#
+# Why we host our own build: since ~b10k upstream builds mtmd (multimodal,
+# Gemma 4 vision) into llama.framework itself, so the header/CMake patches
+# this workflow used to carry are gone. But ggml-org's release zip now ships
+# only the iOS device and macOS slices, and the app's unit tests run on the
+# iOS Simulator, so we still build the simulator slice ourselves.
+#
+# After a run: put the printed SHA-256 into Package.swift `llamaChecksum`.
 
 on:
   workflow_dispatch:
     inputs:
       llama_version:
-        description: 'llama.cpp release tag to build (e.g. b8816)'
+        description: 'llama.cpp build tag to build (e.g. b11669 = v0.7.0)'
         required: true
-        default: 'b8816'
+        default: 'b11669'
 
 jobs:
   build:
@@ -33,136 +45,29 @@ jobs:
           git clone --depth 1 --branch "${{ inputs.llama_version }}" \
             https://github.com/ggml-org/llama.cpp.git llama.cpp
 
-      - name: Patch build-xcframework.sh to include mtmd
+      - name: Confirm mtmd is built into the framework
         working-directory: llama.cpp
         run: |
           set -euo pipefail
-          # 1. Enable tools so tools/mtmd gets built — that's where libmtmd.a comes from.
-          sed -i '' 's/^LLAMA_BUILD_TOOLS=OFF$/LLAMA_BUILD_TOOLS=ON/' build-xcframework.sh
-
-          # 2. Add mtmd public headers to every framework layout. The awk appends
-          #    two cp lines right after the existing gguf.h copy inside
-          #    setup_framework_structure. Anchor on `gguf.h` with flexible
-          #    whitespace and allow either `include/gguf.h` or `ggml/include/gguf.h`
-          #    — the path moved to ggml/include in b8816.
-          awk '
-            /cp .*gguf\.h[[:space:]]+\$\{header_path\}/ && !p {
-              print
-              print "    cp tools/mtmd/mtmd.h         ${header_path}"
-              print "    cp tools/mtmd/mtmd-helper.h  ${header_path}"
-              p=1; next
-            }
-            { print }
-          ' build-xcframework.sh > build-xcframework.sh.new
-          mv build-xcframework.sh.new build-xcframework.sh
-          chmod +x build-xcframework.sh
-
-          # 3. Teach the modulemap about the new headers (same setup_framework_structure).
-          awk '
-            /header "gguf\.h"/ && !p {
-              print
-              print "    header \"mtmd.h\""
-              print "    header \"mtmd-helper.h\""
-              p=1; next
-            }
-            { print }
-          ' build-xcframework.sh > build-xcframework.sh.new
-          mv build-xcframework.sh.new build-xcframework.sh
-          chmod +x build-xcframework.sh
-
-          # 4. Add libmtmd.a to combine_static_libraries so the combined
-          #    framework binary contains mtmd symbols.
-          awk '
-            /"\$\{base_dir\}\/\$\{build_dir\}\/ggml\/src\/ggml-blas\/\$\{release_dir\}\/libggml-blas\.a"/ && !p {
-              print
-              print "        \"${base_dir}/${build_dir}/tools/mtmd/${release_dir}/libmtmd.a\""
-              p=1; next
-            }
-            { print }
-          ' build-xcframework.sh > build-xcframework.sh.new
-          mv build-xcframework.sh.new build-xcframework.sh
-          chmod +x build-xcframework.sh
-
-          # 4b. Upstream bug: mtmd.h forward-declares `struct mtmd_decoder_pos`
-          #     but never typedefs it, while mtmd-helper.h uses the bare name
-          #     `mtmd_decoder_pos *`. In C that compiles under lax rules, but
-          #     clang rejects it when building the framework's modulemap in
-          #     strict C mode ("must use 'struct' tag"). Add the missing
-          #     typedef next to its siblings.
-          awk '
-            /^typedef struct mtmd_input_text   mtmd_input_text;$/ && !p {
-              print
-              print "typedef struct mtmd_decoder_pos  mtmd_decoder_pos;"
-              p=1; next
-            }
-            { print }
-          ' tools/mtmd/mtmd.h > tools/mtmd/mtmd.h.new
-          mv tools/mtmd/mtmd.h.new tools/mtmd/mtmd.h
-          if ! grep -q "^typedef struct mtmd_decoder_pos  mtmd_decoder_pos;$" tools/mtmd/mtmd.h; then
-            echo "::error::mtmd_decoder_pos typedef patch missed anchor"
-            exit 1
-          fi
-
-          # 5. Replace tools/CMakeLists.txt so only the mtmd subdirectory is
-          #    configured. With LLAMA_BUILD_TOOLS=ON the stock file also
-          #    enables batched-bench, tts, llama-bench, etc. — those define
-          #    MACOSX_BUNDLE executables whose install() lacks a BUNDLE
-          #    DESTINATION, which is fatal on iOS/visionOS/tvOS. We don't
-          #    need any of them.
-          printf '%s\n' \
-            'find_package(Threads REQUIRED)' \
-            'llama_add_compile_flags()' \
-            'add_subdirectory(mtmd)' > tools/CMakeLists.txt
-
-          # 6. Strip the CLI executables from tools/mtmd/CMakeLists.txt.
-          #    After `install(TARGETS mtmd LIBRARY PUBLIC_HEADER)` the file
-          #    defines llama-mtmd-cli / llama-mtmd-debug / deprecation
-          #    stubs — all MACOSX_BUNDLE exes that hit the same install
-          #    error on embedded platforms. We only need libmtmd.a.
-          awk '
-            { print }
-            /^install\(TARGETS mtmd LIBRARY PUBLIC_HEADER\)$/ { exit }
-          ' tools/mtmd/CMakeLists.txt > tools/mtmd/CMakeLists.txt.new
-          mv tools/mtmd/CMakeLists.txt.new tools/mtmd/CMakeLists.txt
-
-          echo "--- Confirming patches applied ---"
-          grep -n "LLAMA_BUILD_TOOLS=" build-xcframework.sh
-          grep -n "mtmd\.h\|libmtmd\.a" build-xcframework.sh
-
-          # Fail fast if any of the four script patches silently missed their
-          # anchor. Each mtmd change should land in build-xcframework.sh.
-          required_patterns=(
-            '^LLAMA_BUILD_TOOLS=ON$'
-            'cp tools/mtmd/mtmd\.h '
-            'cp tools/mtmd/mtmd-helper\.h '
-            '^    header "mtmd\.h"$'
-            '^    header "mtmd-helper\.h"$'
-            'tools/mtmd/\$\{release_dir\}/libmtmd\.a'
-          )
-          for pat in "${required_patterns[@]}"; do
+          # Fail fast if a future tag drops mtmd from the stock script.
+          for pat in '^LLAMA_BUILD_MTMD=ON$' 'cp tools/mtmd/mtmd\.h ' 'cp tools/mtmd/mtmd-helper\.h ' 'tools/mtmd/\$\{release_dir\}/libmtmd\.a'; do
             if ! grep -qE "$pat" build-xcframework.sh; then
-              echo "::error::Patch missing anchor: $pat"
+              echo "::error::build-xcframework.sh no longer matches: $pat"
               exit 1
             fi
           done
 
-          echo "--- tools/CMakeLists.txt ---"
-          cat tools/CMakeLists.txt
-          echo "--- tail of tools/mtmd/CMakeLists.txt ---"
-          tail -10 tools/mtmd/CMakeLists.txt
-
       - name: Build the xcframework
         working-directory: llama.cpp
         run: |
-          ./build-xcframework.sh
+          ./build-xcframework.sh ios-sim ios-device macos
 
       - name: Zip the xcframework
         working-directory: llama.cpp
         run: |
           cd build-apple
-          # Match ggml-org's asset naming so downstream consumers see a
-          # familiar filename shape.
-          zip -r "llama-${{ inputs.llama_version }}-mtmd-xcframework.zip" llama.xcframework
+          # -y keeps the macOS framework's symlinks (same as ggml-org's release).
+          zip -r -y "llama-${{ inputs.llama_version }}-mtmd-xcframework.zip" llama.xcframework
           ls -la
 
       # Belt-and-suspenders: keep the zip as a workflow artifact in case
@@ -194,8 +99,8 @@ jobs:
           gh release create "$TAG" \
             "llama-${{ inputs.llama_version }}-mtmd-xcframework.zip" \
             --repo "${{ github.repository }}" \
-            --title "llama.cpp ${{ inputs.llama_version }} with mtmd" \
-            --notes "Custom xcframework build of llama.cpp ${{ inputs.llama_version }} with LLAMA_BUILD_TOOLS=ON so libmtmd.a and its headers ship inside llama.framework. Multimodal APIs (mtmd_*, clip_*) are available alongside the usual llama_* surface.
+            --title "llama.cpp ${{ inputs.llama_version }} xcframework (iOS + simulator + macOS)" \
+            --notes "llama.cpp ${{ inputs.llama_version }} built with its own build-xcframework.sh for iOS device, iOS Simulator and macOS. Multimodal APIs (mtmd_*) ship inside llama.framework.
 
             SHA-256: \`${{ steps.checksum.outputs.checksum }}\`" \
             --latest=false \
