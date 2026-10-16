@@ -12,7 +12,8 @@ let llamaVersion = "b11669"
 // framework itself, so the old header/CMake patches are gone; we still host
 // our own build because ggml-org's release ships only iOS device + macOS
 // slices, and the app's unit tests run on the iOS Simulator.
-let llamaChecksum = "ed953f4077b5fdf8bf84d306cd1509edba6b1fdfe816e376bae5c6242abe9c9d"
+// Release b11669-mtmd: workflow run 38840081591 at 44082e3, Xcode 26.4.1.
+let llamaChecksum = "4e481c2fd180f2935158e91e9f9747a8e65ef694e82367fdacd0c9efff2b5ea7"
 
 let package = Package(
     name: "swift-llama-cpp",
