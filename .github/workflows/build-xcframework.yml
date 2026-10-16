@@ -2,13 +2,18 @@ name: Build llama.xcframework (iOS device + simulator + macOS)
 
 # Builds llama.cpp's own build-xcframework.sh at a release tag and publishes
 # the zip as a release asset of this repo, named the way Package.swift
-# expects (`<tag>-mtmd/llama-<tag>-mtmd-xcframework.zip`).
+# expects (`<tag>-mtmd/llama-<tag>-mtmd-xcframework.zip`), with llama.cpp's
+# licence alongside it.
 #
 # Why we host our own build: since ~b10k upstream builds mtmd (multimodal,
 # Gemma 4 vision) into llama.framework itself, so the header/CMake patches
-# this workflow used to carry are gone. But ggml-org's release zip now ships
+# this workflow used to carry are gone. But ggml-org's release zip ships
 # only the iOS device and macOS slices, and the app's unit tests run on the
 # iOS Simulator, so we still build the simulator slice ourselves.
+#
+# Toolchain: macos-26 runner, Xcode 26.4.1 (17E202), the same Xcode line
+# ggml-org uses for its own v0.7.0 xcframework. Its output links into apps
+# built with Xcode 27.
 #
 # After a run: put the printed SHA-256 into Package.swift `llamaChecksum`.
 
@@ -19,31 +24,84 @@ on:
         description: 'llama.cpp build tag to build (e.g. b11669 = v0.7.0)'
         required: true
         default: 'b11669'
+      llama_commit:
+        description: 'Full commit SHA that tag must point at (b11669 = 620d2225cc436ab0b001e3200e590e3b286ef9ab)'
+        required: true
+        default: '620d2225cc436ab0b001e3200e590e3b286ef9ab'
+      overwrite:
+        description: 'Replace the assets of an existing release with this tag'
+        type: boolean
+        required: false
+        default: false
+
+# One build per llama.cpp tag at a time; never cancel a run mid-publish.
+concurrency:
+  group: build-xcframework-${{ inputs.llama_version }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   build:
-    runs-on: macos-15
-    timeout-minutes: 90
+    runs-on: macos-26
+    timeout-minutes: 120
     # Needed to let GITHUB_TOKEN create releases on this fork; without this
     # `gh release create` returns HTTP 403 "Resource not accessible by integration".
     permissions:
       contents: write
+    env:
+      # Inputs reach scripts only through env, never interpolated into them.
+      LLAMA_VERSION: ${{ inputs.llama_version }}
+      LLAMA_COMMIT: ${{ inputs.llama_commit }}
+      OVERWRITE: ${{ inputs.overwrite }}
+      XCODE_APP: /Applications/Xcode_26.4.1.app
+      XCODE_BUILD: 17E202
     steps:
-      - name: Set up Xcode
-        uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: latest-stable
-
-      - name: Show toolchain versions
+      - name: Validate inputs
         run: |
+          set -euo pipefail
+          if [[ ! "$LLAMA_VERSION" =~ ^b[0-9]+$ ]]; then
+            echo "::error::llama_version must match ^b[0-9]+\$"
+            exit 1
+          fi
+          if [[ ! "$LLAMA_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::llama_commit must be a full 40-character commit SHA"
+            exit 1
+          fi
+          if [[ "$OVERWRITE" != "true" && "$OVERWRITE" != "false" ]]; then
+            echo "::error::overwrite must be true or false"
+            exit 1
+          fi
+          echo "ZIP_NAME=llama-${LLAMA_VERSION}-mtmd-xcframework.zip" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=${LLAMA_VERSION}-mtmd" >> "$GITHUB_ENV"
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
           xcodebuild -version
+          actual=$(xcodebuild -version | awk '/Build version/ {print $3}')
+          if [[ "$actual" != "$XCODE_BUILD" ]]; then
+            echo "::error::expected Xcode build $XCODE_BUILD, got $actual"
+            exit 1
+          fi
           cmake --version
-          xcrun --show-sdk-version --sdk iphoneos || true
+          xcrun --show-sdk-version --sdk iphoneos
+          xcrun --show-sdk-version --sdk iphonesimulator
+          xcrun --show-sdk-version --sdk macosx
 
-      - name: Clone llama.cpp at ${{ inputs.llama_version }}
+      - name: Clone llama.cpp at the requested tag and check its commit
         run: |
-          git clone --depth 1 --branch "${{ inputs.llama_version }}" \
+          set -euo pipefail
+          git clone --depth 1 --branch "$LLAMA_VERSION" \
             https://github.com/ggml-org/llama.cpp.git llama.cpp
+          actual=$(git -C llama.cpp rev-parse HEAD)
+          if [[ "$actual" != "$LLAMA_COMMIT" ]]; then
+            echo "::error::tag $LLAMA_VERSION is commit $actual, expected $LLAMA_COMMIT"
+            exit 1
+          fi
+          echo "llama.cpp $LLAMA_VERSION = $actual"
 
       - name: Confirm mtmd is built into the framework
         working-directory: llama.cpp
@@ -62,22 +120,54 @@ jobs:
         run: |
           ./build-xcframework.sh ios-sim ios-device macos
 
-      - name: Zip the xcframework
+      - name: Check the three slices
+        working-directory: llama.cpp/build-apple
+        run: |
+          set -euo pipefail
+          fw=llama.xcframework
+          python3 - "$fw/Info.plist" <<'PY'
+          import plistlib, sys
+          libs = plistlib.load(open(sys.argv[1], 'rb'))['AvailableLibraries']
+          ids = sorted(l['LibraryIdentifier'] for l in libs)
+          want = ['ios-arm64', 'ios-arm64_x86_64-simulator', 'macos-arm64_x86_64']
+          print('slices:', ids)
+          sys.exit(0 if ids == want else 'expected slices ' + str(want))
+          PY
+          check() {
+            local bin="$1" archs="$2" headers="$3"
+            test -f "$bin" || { echo "::error::missing $bin"; exit 1; }
+            got=$(lipo -archs "$bin")
+            [[ "$got" == "$archs" ]] || { echo "::error::$bin has archs '$got', expected '$archs'"; exit 1; }
+            for sym in _llama_decode _mtmd_tokenize _mtmd_helper_eval_chunks; do
+              nm -gU "$bin" | grep -q " T $sym$" || { echo "::error::$bin lacks $sym"; exit 1; }
+            done
+            for h in llama.h ggml.h mtmd.h mtmd-helper.h; do
+              test -f "$headers/$h" || { echo "::error::missing $headers/$h"; exit 1; }
+            done
+            echo "ok: $bin ($got)"
+          }
+          check "$fw/ios-arm64/llama.framework/llama" "arm64" "$fw/ios-arm64/llama.framework/Headers"
+          check "$fw/ios-arm64_x86_64-simulator/llama.framework/llama" "x86_64 arm64" "$fw/ios-arm64_x86_64-simulator/llama.framework/Headers"
+          check "$fw/macos-arm64_x86_64/llama.framework/Versions/A/llama" "x86_64 arm64" "$fw/macos-arm64_x86_64/llama.framework/Versions/A/Headers"
+
+      - name: Zip the xcframework and stage the licence
         working-directory: llama.cpp
         run: |
+          set -euo pipefail
+          cp LICENSE build-apple/llama.cpp-LICENSE.txt
           cd build-apple
           # -y keeps the macOS framework's symlinks (same as ggml-org's release).
-          zip -r -y "llama-${{ inputs.llama_version }}-mtmd-xcframework.zip" llama.xcframework
+          zip -r -y "$ZIP_NAME" llama.xcframework
           ls -la
 
       # Belt-and-suspenders: keep the zip as a workflow artifact in case
       # the release-creation step can't write to the repo. Artifacts are
       # downloadable via `gh run download` for up to 90 days.
       - name: Upload xcframework as workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: llama-${{ inputs.llama_version }}-mtmd-xcframework
-          path: llama.cpp/build-apple/llama-${{ inputs.llama_version }}-mtmd-xcframework.zip
+          path: llama.cpp/build-apple/${{ env.ZIP_NAME }}
           if-no-files-found: error
           retention-days: 90
 
@@ -85,26 +175,41 @@ jobs:
         id: checksum
         working-directory: llama.cpp/build-apple
         run: |
-          CHECKSUM=$(shasum -a 256 "llama-${{ inputs.llama_version }}-mtmd-xcframework.zip" | awk '{print $1}')
+          set -euo pipefail
+          CHECKSUM=$(shasum -a 256 "$ZIP_NAME" | awk '{print $1}')
           echo "checksum=$CHECKSUM" >> "$GITHUB_OUTPUT"
           echo "SHA-256: $CHECKSUM"
 
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHECKSUM: ${{ steps.checksum.outputs.checksum }}
         working-directory: llama.cpp/build-apple
         run: |
-          TAG="${{ inputs.llama_version }}-mtmd"
-          # --clobber so re-running the workflow with the same inputs updates the asset.
-          gh release create "$TAG" \
-            "llama-${{ inputs.llama_version }}-mtmd-xcframework.zip" \
-            --repo "${{ github.repository }}" \
-            --title "llama.cpp ${{ inputs.llama_version }} xcframework (iOS + simulator + macOS)" \
-            --notes "llama.cpp ${{ inputs.llama_version }} built with its own build-xcframework.sh for iOS device, iOS Simulator and macOS. Multimodal APIs (mtmd_*) ship inside llama.framework.
-
-            SHA-256: \`${{ steps.checksum.outputs.checksum }}\`" \
-            --latest=false \
-          || gh release upload "$TAG" \
-               "llama-${{ inputs.llama_version }}-mtmd-xcframework.zip" \
-               --repo "${{ github.repository }}" \
-               --clobber
+          set -euo pipefail
+          XCODE_VERSION=$(xcodebuild -version | tr '\n' ' ')
+          {
+            echo "llama.cpp ${LLAMA_VERSION} (commit ${LLAMA_COMMIT}) built with its own build-xcframework.sh for iOS device, iOS Simulator and macOS. Multimodal APIs (mtmd_*) ship inside llama.framework."
+            echo
+            echo "SHA-256: \`${CHECKSUM}\`"
+            echo
+            echo "Built by ${GITHUB_REPOSITORY} at ${GITHUB_SHA} with ${XCODE_VERSION}"
+            echo
+            echo "llama.cpp is MIT-licensed (copyright the ggml authors); its licence is attached as llama.cpp-LICENSE.txt."
+          } > release-notes.md
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            if [[ "$OVERWRITE" != "true" ]]; then
+              echo "::error::release $RELEASE_TAG already exists; re-run with overwrite=true to replace its assets"
+              exit 1
+            fi
+            gh release upload "$RELEASE_TAG" "$ZIP_NAME" llama.cpp-LICENSE.txt \
+              --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file release-notes.md
+          else
+            gh release create "$RELEASE_TAG" "$ZIP_NAME" llama.cpp-LICENSE.txt \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "llama.cpp ${LLAMA_VERSION} xcframework (iOS + simulator + macOS)" \
+              --notes-file release-notes.md \
+              --latest=false
+          fi

@@ -55,16 +55,6 @@ public final class LlamaBatch {
         rawBatch.logits[Int(rawBatch.n_tokens - 1)] = logits ? 1 : 0
     }
 
-     /// Convenience: build a single-sequence batch for a set of tokens where only the last token emits logits.
-     public static func singleSequence(tokens: [llama_token]) -> LlamaBatch {
-         var cTokens = tokens
-         let batch = llama_batch_get_one(&cTokens, Int32(tokens.count))
-         // Wrap into class to ensure free on deinit
-         let wrapper = LlamaBatch(initialSize: Int32(tokens.count))
-         wrapper.rawBatch = batch
-         return wrapper
-     }
-
     /// Set an external embedding vector for the current token index.
     /// Note: Caller must ensure the `LlamaBatch` was initialized with embeddings.
     public func setEmbedding(_ vector: [Float]) {

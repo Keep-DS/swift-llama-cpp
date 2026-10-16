@@ -19,6 +19,9 @@ public enum LlamaMtmdError: Error {
 /// that serialization for callers in this package.
 public final class LlamaMtmdContext {
     let pointer: OpaquePointer
+    /// mtmd keeps a pointer to the text model; holding it here means the
+    /// model can't be freed while this context is alive.
+    private let model: LlamaModel
 
     /// Initialize an mtmd context from an mmproj GGUF file and an
     /// already-loaded text model. Returns `nil` if the underlying
@@ -43,6 +46,7 @@ public final class LlamaMtmdContext {
         }
         guard let p else { return nil }
         self.pointer = p
+        self.model = model
     }
 
     deinit {

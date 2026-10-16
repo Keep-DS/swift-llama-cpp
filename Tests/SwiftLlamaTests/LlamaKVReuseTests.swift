@@ -71,7 +71,7 @@ struct LlamaKVReuseTests {
         #expect(a == LlamaKVReuse.snapshotName(identity: "m.gguf|1|ctx=8192", tokens: [1, 2, 3]))
         #expect(a != LlamaKVReuse.snapshotName(identity: "m.gguf|1|ctx=4096", tokens: [1, 2, 3]))
         #expect(a != LlamaKVReuse.snapshotName(identity: "m.gguf|1|ctx=8192", tokens: [1, 2, 4]))
-        #expect(a.hasPrefix(LlamaKVReuse.identityTag("m.gguf|1|ctx=8192") + "-"))
+        #expect(a.hasPrefix(LlamaPromptCache.currentVersionTag + "-" + LlamaKVReuse.identityTag("m.gguf|1|ctx=8192") + "-"))
         #expect(a.hasSuffix(".kvprefix"))
         // FNV-1a reference value for "a".
         #expect(LlamaKVReuse.fnv1a(Array("a".utf8)) == 0xaf63_dc4c_8601_ec8c)

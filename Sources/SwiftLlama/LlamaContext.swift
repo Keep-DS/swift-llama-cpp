@@ -81,7 +81,7 @@ public final class LlamaContext {
 
     public func decode(batch: LlamaBatch) throws {
         let returnCode = llama_decode(contextPointer, batch.rawBatch)
-        guard returnCode >= 0 else {
+        guard Self.succeeded(returnCode) else {
             throw LlamaContextError.decodingError
         }
         synchronize()
@@ -90,9 +90,14 @@ public final class LlamaContext {
     /// Run encoder-only pass for encoder-decoder models or preprocess inputs.
     public func encode(batch: LlamaBatch) throws {
         let rc = llama_encode(contextPointer, batch.rawBatch)
-        guard rc >= 0 else { throw LlamaContextError.decodingError }
+        guard Self.succeeded(rc) else { throw LlamaContextError.decodingError }
         synchronize()
     }
+
+    /// llama_decode / llama_encode succeed only with 0. Positive codes are
+    /// failures too: 1 = no KV slot for the batch, 2 = aborted (part of the
+    /// batch may already be in the cache); negative codes are errors.
+    static func succeeded(_ returnCode: Int32) -> Bool { returnCode == 0 }
 
     // MARK: - Safe logits & embeddings access
 

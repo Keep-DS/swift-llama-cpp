@@ -88,11 +88,27 @@ enum LlamaKVReuse {
         return String(repeating: "0", count: max(0, 16 - s.count)) + s
     }
 
-    /// Snapshot file name: `<identity hash>-<token hash>.kvprefix`. The
-    /// identity (model file, context size, batch, backend) is part of the name
-    /// so a snapshot is never restored into a context it wasn't made for.
-    static func snapshotName(identity: String, tokens: [Int32]) -> String {
-        "\(identityTag(identity))-\(hex(tokenHash(tokens))).\(LlamaPromptCache.fileExtension)"
+    /// Bump when the snapshot layout or its identity rules change.
+    static let snapshotFormat = "v2"
+
+    /// Leads every snapshot file name: the snapshot format plus the engine's
+    /// state-file version (LLAMA_STATE_SEQ_VERSION), e.g. "v2s4".
+    static func versionTag(stateVersion: Int) -> String {
+        "\(snapshotFormat)s\(stateVersion)"
+    }
+
+    /// Whether a snapshot file was written under `versionTag`. Files from any
+    /// other version (including the untagged names before v2) are stale.
+    static func isCurrentVersion(fileName: String, versionTag: String) -> Bool {
+        fileName.hasPrefix(versionTag + "-")
+    }
+
+    /// Snapshot file name: `<version>-<identity hash>-<token hash>.kvprefix`.
+    /// The identity (model file, context size, batch, backend) is part of the
+    /// name so a snapshot is never restored into a context it wasn't made for.
+    static func snapshotName(identity: String, tokens: [Int32],
+                             versionTag: String = LlamaPromptCache.currentVersionTag) -> String {
+        "\(versionTag)-\(identityTag(identity))-\(hex(tokenHash(tokens))).\(LlamaPromptCache.fileExtension)"
     }
 
     static func identityTag(_ identity: String) -> String {
@@ -114,23 +130,31 @@ enum LlamaKVReuse {
 final class LlamaPromptCache {
     static let fileExtension = "kvprefix"
 
+    /// The version tag for snapshots this build of the engine writes.
+    static let currentVersionTag = LlamaKVReuse.versionTag(stateVersion: Int(LLAMA_STATE_SEQ_VERSION))
+
     let directory: URL
     let maxFiles: Int
     let identity: String
+    let versionTag: String
 
-    init(directory: URL, maxFiles: Int, identity: String) {
+    /// Deletes snapshots written under any other version tag (an older
+    /// engine's files can never be restored, so they're only dead weight).
+    init(directory: URL, maxFiles: Int, identity: String, versionTag: String = LlamaPromptCache.currentVersionTag) {
         self.directory = directory
         self.maxFiles = maxFiles
         self.identity = identity
+        self.versionTag = versionTag
+        removeOtherVersions()
     }
 
     func url(for tokens: [llama_token]) -> URL {
-        directory.appendingPathComponent(LlamaKVReuse.snapshotName(identity: identity, tokens: tokens))
+        directory.appendingPathComponent(LlamaKVReuse.snapshotName(identity: identity, tokens: tokens, versionTag: versionTag))
     }
 
     /// The most recently used snapshot made for this model + context.
     func newestSnapshotURL() -> URL? {
-        let tag = LlamaKVReuse.identityTag(identity) + "-"
+        let tag = "\(versionTag)-\(LlamaKVReuse.identityTag(identity))-"
         return snapshots()
             .filter { $0.url.lastPathComponent.hasPrefix(tag) }
             .max { $0.date < $1.date }?
@@ -168,6 +192,14 @@ final class LlamaPromptCache {
 
     func remove(_ url: URL) {
         try? FileManager.default.removeItem(at: url)
+    }
+
+    /// Remove `.kvprefix` files whose name doesn't carry `versionTag`.
+    func removeOtherVersions() {
+        for snapshot in snapshots()
+        where !LlamaKVReuse.isCurrentVersion(fileName: snapshot.url.lastPathComponent, versionTag: versionTag) {
+            try? FileManager.default.removeItem(at: snapshot.url)
+        }
     }
 
     /// Keep the newest `maxFiles` snapshots (any model), drop stray temp files.

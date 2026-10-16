@@ -84,12 +84,42 @@ public final class LlamaModel {
     }
 
     /// Convert a token id to its piece (optionally rendering special tokens).
+    /// A token that is only part of a multi-byte UTF-8 character (byte-level
+    /// BPE splits some emoji this way) has no String form on its own and
+    /// returns ""; use `pieceBytes(from:)` and `LlamaUTF8` to stream text.
     public func piece(from token: llama_token, renderSpecial: Bool = false, lstrip: Int32 = 0) -> String {
-        let bufferSize: Int32 = 64
-        var buffer = [CChar](repeating: 0, count: Int(bufferSize))
-        let charCount = llama_token_to_piece(vocabPointer, token, &buffer, bufferSize, lstrip, renderSpecial)
-        let chars = Array(buffer.prefix(upTo: Int(charCount))) + [0]
-        return String(cString: chars, encoding: .utf8) ?? ""
+        String(bytes: pieceBytes(from: token, renderSpecial: renderSpecial, lstrip: lstrip), encoding: .utf8) ?? ""
+    }
+
+    /// The raw UTF-8 bytes of a token's piece. Grows the buffer when
+    /// llama.cpp reports the piece is longer than the first guess.
+    public func pieceBytes(from token: llama_token, renderSpecial: Bool = false, lstrip: Int32 = 0) -> [UInt8] {
+        Self.fillRetryingOnce(initialCapacity: 64, filler: CChar(0)) { buffer, capacity in
+            llama_token_to_piece(vocabPointer, token, buffer, capacity, lstrip, renderSpecial)
+        }.map { UInt8(bitPattern: $0) }
+    }
+
+    /// Call a llama.cpp "fill this buffer" function. Those return the count
+    /// written, or minus the count they needed when the buffer was too small
+    /// (and INT32_MIN when the count doesn't fit in Int32). On a negative
+    /// count this retries once with the size asked for; it never traps.
+    static func fillRetryingOnce<T>(
+        initialCapacity: Int,
+        filler: T,
+        _ fill: (UnsafeMutablePointer<T>, Int32) -> Int32
+    ) -> [T] {
+        var capacity = max(1, initialCapacity)
+        for _ in 0..<2 {
+            var buffer = [T](repeating: filler, count: capacity)
+            let count = buffer.withUnsafeMutableBufferPointer { raw -> Int32 in
+                guard let base = raw.baseAddress else { return 0 }
+                return fill(base, Int32(clamping: raw.count))
+            }
+            if count >= 0 { return Array(buffer.prefix(min(Int(count), capacity))) }
+            if count == Int32.min { return [] }
+            capacity = Int(-count)
+        }
+        return []
     }
 
     /// Beginning-of-sentence token id.
@@ -125,11 +155,12 @@ public final class LlamaModel {
             return []
         }
         let utf8Count = text.utf8.count
-        let maxTokens = trainedContextSize()
-        let tokenBufferSize = utf8Count + (addBos ? 1 : 0) + 1
-        var tokensBuffer = [llama_token](repeating: llama_token(), count: Int(tokenBufferSize))
-        let tokenCount = llama_tokenize(vocabPointer, text, Int32(utf8Count), &tokensBuffer, maxTokens, addBos, special)
-        return Array(tokensBuffer.prefix(upTo: Int(tokenCount)))
+        // One token per byte plus BOS/EOS covers every vocabulary we load;
+        // if llama.cpp still asks for more (negative count), retry at that
+        // size. The capacity passed is the real buffer size, never more.
+        return Self.fillRetryingOnce(initialCapacity: utf8Count + 2, filler: llama_token()) { buffer, capacity in
+            llama_tokenize(vocabPointer, text, Int32(clamping: utf8Count), buffer, capacity, addBos, special)
+        }
     }
 
     /// Convert tokens back to text (inverse of tokenize)

@@ -26,6 +26,9 @@ final actor Llama {
     private let swaWindow: Int
     /// The warm-up decode has run (or a real decode has paged the weights in).
     private var weightsWarmed = false
+    /// Bytes of a character split across tokens, waiting for the rest
+    /// (see `LlamaUTF8`).
+    private var pendingPieceBytes: [UInt8] = []
 
     init(modelPath: String, config: LlamaConfig) throws {
         self.config = config
@@ -106,12 +109,11 @@ final actor Llama {
                 String(fileSize),
                 "ctx=\(contextParam.n_ctx)",
                 "batch=\(config.batchSize)",
-                "gpu=\(config.useGPU && !forceCPUOnlyPath)",
-                // The engine's state-file format: snapshots written by an
-                // older llama.cpp are never offered to a newer one.
-                "state=\(LLAMA_STATE_SEQ_VERSION)",
-                "v2"
+                "gpu=\(config.useGPU && !forceCPUOnlyPath)"
             ].joined(separator: "|")
+            // The file names also carry the snapshot format + the engine's
+            // state-file version; files from any other version are deleted
+            // here, so an older llama.cpp's snapshots are never offered.
             self.promptCache = LlamaPromptCache(directory: directory, maxFiles: config.promptCacheMaxFiles, identity: identity)
         } else {
             self.promptCache = nil
@@ -174,6 +176,7 @@ final actor Llama {
     /// multimodal turns always re-process from position 0.
     func initializeMultimodalCompletion(prompt: String, images: [Data]) throws {
         guard let mtmd else { throw LlamaMtmdError.initializationFailed }
+        pendingPieceBytes = []
 
         var bitmaps: [LlamaBitmap] = []
         bitmaps.reserveCapacity(images.count)
@@ -254,7 +257,11 @@ final actor Llama {
             batch.reset()
             batch.addToken(model.bosToken(), at: 0, logits: true)
             defer { clear() }
-            try context.decode(batch: batch)
+            do {
+                try context.decode(batch: batch)
+            } catch {
+                throw LlamaError.decodingError
+            }
             weightsWarmed = true
             print("### Warm-up decode: \(Int((CFAbsoluteTimeGetCurrent() - start) * 1000))ms")
         }
@@ -264,6 +271,7 @@ final actor Llama {
     }
 
     private func initializeCompletion(text: String, cacheablePrefix: String? = nil) throws {
+        pendingPieceBytes = []
         print("attempting to complete \"\(text)\"")
 
         let tokenList = model.tokenize(text: text, addBos: model.shouldAddBos(), special: true)
@@ -381,9 +389,20 @@ final actor Llama {
         processedTokens.append(newTokenId)
 
         currentTokenPosition += 1
-        try context.decode(batch: batch)
+        do {
+            try context.decode(batch: batch)
+        } catch {
+            // A failed decode can leave the cache half-written: start the
+            // next prompt clean, and throw the error callers map (the
+            // context's own error type is internal detail).
+            clear()
+            throw LlamaError.decodingError
+        }
 
-        return .token(model.piece(from: newTokenId))
+        // Emit only whole characters; carry a split one to the next token.
+        let split = LlamaUTF8.splitIncompleteTail(pendingPieceBytes + model.pieceBytes(from: newTokenId))
+        pendingPieceBytes = split.tail
+        return .token(String(decoding: split.complete, as: UTF8.self))
     }
 
     func updateSamplingConfig(_ config: LlamaSamplingConfig) {
@@ -393,6 +412,8 @@ final actor Llama {
     private func clear() {
         context.clearKVCache()
         processedTokens = []
+        currentTokenPosition = 0
+        pendingPieceBytes = []
         batch = .init(initialSize: Int32(config.batchSize))
     }
 
