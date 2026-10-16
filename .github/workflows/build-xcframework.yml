@@ -56,7 +56,7 @@ jobs:
       LLAMA_COMMIT: ${{ inputs.llama_commit }}
       OVERWRITE: ${{ inputs.overwrite }}
       XCODE_APP: /Applications/Xcode_26.4.1.app
-      XCODE_BUILD: 17E202
+      XCODE_BUILD: '17E202'   # quoted: unquoted YAML reads 17E202 as a float
     steps:
       - name: Validate inputs
         run: |
