@@ -138,8 +138,11 @@ jobs:
             test -f "$bin" || { echo "::error::missing $bin"; exit 1; }
             got=$(lipo -archs "$bin")
             [[ "$got" == "$archs" ]] || { echo "::error::$bin has archs '$got', expected '$archs'"; exit 1; }
+            # Read the symbol table once: piping nm into `grep -q` lets grep
+            # exit early, nm dies of SIGPIPE, and pipefail fails the check.
+            syms=$(nm -gU "$bin")
             for sym in _llama_decode _mtmd_tokenize _mtmd_helper_eval_chunks; do
-              nm -gU "$bin" | grep -q " T $sym$" || { echo "::error::$bin lacks $sym"; exit 1; }
+              grep -q " T $sym$" <<< "$syms" || { echo "::error::$bin lacks $sym"; exit 1; }
             done
             for h in llama.h ggml.h mtmd.h mtmd-helper.h; do
               test -f "$headers/$h" || { echo "::error::missing $headers/$h"; exit 1; }
