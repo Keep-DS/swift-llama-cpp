@@ -23,12 +23,14 @@ final actor Llama {
     /// On-disk prefix snapshots (nil when the config names no directory).
     private let promptCache: LlamaPromptCache?
     /// Sliding-window size of the model's SWA layers (0 when it has none).
-    private let swaWindow: Int
+    let swaWindow: Int
     /// The warm-up decode has run (or a real decode has paged the weights in).
     private var weightsWarmed = false
     /// Bytes of a character split across tokens, waiting for the rest
     /// (see `LlamaUTF8`).
     private var pendingPieceBytes: [UInt8] = []
+    /// How the last prompt reused the KV cache (for logs and tests).
+    private(set) var lastPlan: LlamaKVReuse.Plan?
 
     init(modelPath: String, config: LlamaConfig) throws {
         self.config = config
@@ -151,6 +153,14 @@ final actor Llama {
     /// Return the full processed token id sequence (prompt + generated).
     func getProcessedTokenIds() -> [llama_token] { processedTokens }
 
+    /// The logits for the next token after the last decode.
+    func lastLogits() -> [Float]? { context.lastLogits() }
+
+    /// How many tokens `text` is, as a prompt.
+    func tokenCount(_ text: String) -> Int {
+        model.tokenize(text: text, addBos: model.shouldAddBos(), special: true).count
+    }
+
     /// Load the multimodal projector for this model. Idempotent — if
     /// already loaded, returns immediately without reloading. Throws
     /// `LlamaMtmdError.initializationFailed` if the projector file is
@@ -241,6 +251,13 @@ final actor Llama {
         try initializeCompletion(text: prompt, cacheablePrefix: cacheablePrefix)
     }
 
+    /// Read `prompt` into the KV cache without generating, so a completion
+    /// that continues it only processes what follows: a chat's history,
+    /// read while the user types.
+    func prefill(prompt: String, cacheablePrefix: String?) throws {
+        try initializeCompletion(text: prompt, cacheablePrefix: cacheablePrefix)
+    }
+
     /// Page the model in before the first real prompt: a one-token decode
     /// touches every layer's weights and builds the GPU pipelines, then
     /// the newest prefix snapshot (if any) is restored, so the next prompt
@@ -272,7 +289,6 @@ final actor Llama {
 
     private func initializeCompletion(text: String, cacheablePrefix: String? = nil) throws {
         pendingPieceBytes = []
-        print("attempting to complete \"\(text)\"")
 
         let tokenList = model.tokenize(text: text, addBos: model.shouldAddBos(), special: true)
         guard tokenList.count < maxTokenCount - 4 else {
@@ -299,6 +315,12 @@ final actor Llama {
             minResidentPosition: Int(context.memory.minPosition(for: 0))
         )
 
+        lastPlan = plan
+        let start = CFAbsoluteTimeGetCurrent()
+        defer {
+            // Sizes and timing only: the prompt itself is the user's chat.
+            print("### Prompt \(tokenList.count) tokens, \(plan), read in \(Int((CFAbsoluteTimeGetCurrent() - start) * 1000))ms")
+        }
         switch plan {
         case .extend:
             print("### Using cached processing")

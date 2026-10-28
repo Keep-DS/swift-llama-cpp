@@ -165,6 +165,16 @@ public final actor LlamaService {
         return makeStream(llama: llama)
     }
 
+    /// Read a caller-formatted prompt into the KV cache without generating
+    /// (a chat's history while the user types), so the completion that
+    /// continues it processes only what follows. Stops any completion first.
+    public func prefill(prompt: String, cacheablePrefix: String?) async throws {
+        guard !prompt.isEmpty else { throw LlamaError.emptyMessageArray }
+        let llama = try initializeLlamaIfNecessary()
+        await stopCompletion()
+        try await llama.prefill(prompt: prompt, cacheablePrefix: cacheablePrefix)
+    }
+
     /// Load the model now instead of on the first completion, page its
     /// weights in, and restore the newest prompt-prefix snapshot, so the next
     /// completion starts quickly. Safe to call repeatedly; a no-op while a
