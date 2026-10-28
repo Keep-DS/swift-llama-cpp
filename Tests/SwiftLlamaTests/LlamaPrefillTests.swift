@@ -65,4 +65,21 @@ struct LlamaPrefillTests {
         let largest = zip(resumed, scratch).map { abs($0 - $1) }.max() ?? .infinity
         #expect(largest < 0.05, "logits differ by up to \(largest)")
     }
+
+    /// A stopped read-ahead keeps what it read: the next prompt carries on
+    /// from there instead of starting over.
+    @Test("A stopped read-ahead keeps what it read", .enabled(if: modelPath != nil))
+    func stoppedPrefillKeepsItsPart() async throws {
+        let llama = try model()
+        let history = turn("user", words("alpha", 700)) + turn("model", words("beta", 300))
+        let stop = PrefillStop()
+        stop.stop()
+        await #expect(throws: PrefillStopped.self) {
+            try await llama.prefill(prompt: history, cacheablePrefix: nil, stop: stop)
+        }
+        let kept = await llama.getProcessedTokenIds().count
+        #expect(kept == 256, "one batch, then it stopped")
+        try await llama.prefill(prompt: history, cacheablePrefix: nil)
+        #expect(await llama.lastPlan == .extend)
+    }
 }

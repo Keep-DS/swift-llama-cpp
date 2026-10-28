@@ -172,8 +172,19 @@ public final actor LlamaService {
         guard !prompt.isEmpty else { throw LlamaError.emptyMessageArray }
         let llama = try initializeLlamaIfNecessary()
         await stopCompletion()
-        try await llama.prefill(prompt: prompt, cacheablePrefix: cacheablePrefix)
+        prefillStop.reset()
+        try await llama.prefill(prompt: prompt, cacheablePrefix: cacheablePrefix, stop: prefillStop)
     }
+
+    /// Stops a `prefill` under way at the next batch boundary; it throws
+    /// `PrefillStopped`, and what it read stays in the cache. For a read-ahead
+    /// the app no longer needs (another chat, the app leaving the screen), so
+    /// what comes next doesn't wait for it. Callable from anywhere.
+    public nonisolated func stopPrefill() {
+        prefillStop.stop()
+    }
+
+    private nonisolated let prefillStop = PrefillStop()
 
     /// Load the model now instead of on the first completion, page its
     /// weights in, and restore the newest prompt-prefix snapshot, so the next

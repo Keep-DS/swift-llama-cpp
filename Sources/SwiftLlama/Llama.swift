@@ -6,6 +6,21 @@ enum NextToken {
     case endOfString
 }
 
+/// Thrown by a `prefill` stopped between batches (`LlamaService.stopPrefill`).
+/// What it had read stays in the cache, so a prompt that continues it picks
+/// up from there.
+public struct PrefillStopped: Error {}
+
+/// A stop request for a `prefill` under way, set from outside the actor and
+/// read between batches.
+final class PrefillStop: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stopped = false
+    func stop() { lock.lock(); stopped = true; lock.unlock() }
+    func reset() { lock.lock(); stopped = false; lock.unlock() }
+    var isStopped: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
+}
+
 final actor Llama {
     private let model: LlamaModel
     let context: LlamaContext
@@ -31,6 +46,8 @@ final actor Llama {
     private var pendingPieceBytes: [UInt8] = []
     /// How the last prompt reused the KV cache (for logs and tests).
     private(set) var lastPlan: LlamaKVReuse.Plan?
+    /// The stop request of the `prefill` under way, if any.
+    private var prefillStop: PrefillStop?
 
     init(modelPath: String, config: LlamaConfig) throws {
         self.config = config
@@ -254,7 +271,9 @@ final actor Llama {
     /// Read `prompt` into the KV cache without generating, so a completion
     /// that continues it only processes what follows: a chat's history,
     /// read while the user types.
-    func prefill(prompt: String, cacheablePrefix: String?) throws {
+    func prefill(prompt: String, cacheablePrefix: String?, stop: PrefillStop? = nil) throws {
+        prefillStop = stop
+        defer { prefillStop = nil }
         try initializeCompletion(text: prompt, cacheablePrefix: cacheablePrefix)
     }
 
@@ -464,8 +483,14 @@ final actor Llama {
                 if isLast || batch.size == config.batchSize {
                     try processBatch()
                     batch.reset()
+                    // A read-ahead the app no longer needs stops here, keeping
+                    // what it read (the cache holds exactly those tokens).
+                    if !isLast, prefillStop?.isStopped == true { throw PrefillStopped() }
                 }
             }
+        } catch is PrefillStopped {
+            currentTokenPosition = Int32(processedTokens.count)
+            throw PrefillStopped()
         } catch {
             // A failed decode leaves the cache partly written: start clean.
             clear()
