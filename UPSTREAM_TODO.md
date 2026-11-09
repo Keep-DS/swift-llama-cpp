@@ -5,7 +5,7 @@ upstreams. Keep this list short and concrete; delete entries once merged.
 
 ## ggml-org/llama.cpp
 
-Nothing carried as of v0.7.0 (b11669). Both earlier entries are resolved
+Nothing carried as of v0.8.0 (b11960). Both earlier entries are resolved
 upstream:
 
 - The missing `mtmd_decoder_pos` typedef: `mtmd-helper.h` now spells it

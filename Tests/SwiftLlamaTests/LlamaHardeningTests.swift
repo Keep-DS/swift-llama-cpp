@@ -102,10 +102,12 @@ struct LlamaHardeningTests {
     @Test("Snapshot names lead with the format and engine state version")
     func snapshotVersionTag() {
         let tag = LlamaPromptCache.currentVersionTag
-        #expect(tag == "v2s\(LLAMA_STATE_SEQ_VERSION)")
+        #expect(tag == "v3s\(LLAMA_STATE_SEQ_VERSION)")
         let name = LlamaKVReuse.snapshotName(identity: "m.gguf|1", tokens: [1, 2, 3])
         #expect(LlamaKVReuse.isCurrentVersion(fileName: name, versionTag: tag))
-        #expect(!LlamaKVReuse.isCurrentVersion(fileName: name, versionTag: "v2s5"))
+        #expect(!LlamaKVReuse.isCurrentVersion(fileName: name, versionTag: "v3s5"))
+        // b11669's snapshots (same state-file version, older engine) are stale.
+        #expect(!LlamaKVReuse.isCurrentVersion(fileName: "v2s4-aaaa-bbbb.kvprefix", versionTag: tag))
         // The untagged names written before v2 never count as current.
         #expect(!LlamaKVReuse.isCurrentVersion(fileName: "1eeddce243cbbe0f-3f97df29b7170ba9.kvprefix", versionTag: tag))
     }
@@ -116,7 +118,7 @@ struct LlamaHardeningTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let current = LlamaKVReuse.snapshotName(identity: "other-model", tokens: [7])
-        let stale = ["1eeddce243cbbe0f-3f97df29b7170ba9.kvprefix", "v1s2-aaaa-bbbb.kvprefix", "v2s3-aaaa-bbbb.kvprefix"]
+        let stale = ["1eeddce243cbbe0f-3f97df29b7170ba9.kvprefix", "v1s2-aaaa-bbbb.kvprefix", "v2s3-aaaa-bbbb.kvprefix", "v2s4-aaaa-bbbb.kvprefix"]
         for name in stale + [current, "notes.txt"] {
             try Data([1]).write(to: dir.appendingPathComponent(name))
         }

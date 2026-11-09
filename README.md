@@ -3,7 +3,7 @@
 Run any LLM locally on iOS or MacOS. Powered by [llama.cpp](https://github.com/ggml-org/llama.cpp)
 
 This is Keep-DS's fork of [pgorzelany/swift-llama-cpp](https://github.com/pgorzelany/swift-llama-cpp)
-by Piotr Gorzelany. It pins llama.cpp v0.7.0 (build tag `b11669`) and adds
+by Piotr Gorzelany. It pins llama.cpp v0.8.0 (build tag `b11960`) and adds
 multimodal (mtmd) image input, raw-prompt completion, prompt-prefix KV
 snapshots, a warm-up call and SWA-safe cache trimming. The llama.cpp binary
 is an xcframework (iOS device, iOS Simulator, macOS) built by

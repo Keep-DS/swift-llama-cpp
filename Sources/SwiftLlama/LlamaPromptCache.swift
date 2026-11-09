@@ -88,11 +88,15 @@ enum LlamaKVReuse {
         return String(repeating: "0", count: max(0, 16 - s.count)) + s
     }
 
-    /// Bump when the snapshot layout or its identity rules change.
-    static let snapshotFormat = "v2"
+    /// Bump when the snapshot layout or its identity rules change, and with
+    /// every llama.cpp upgrade: a snapshot holds the KV values one engine
+    /// computed, and a newer engine's can differ even when its state-file
+    /// version doesn't. v2 was llama.cpp b11669; v3 is b11960 (v0.8.0),
+    /// whose state-file version is still 4.
+    static let snapshotFormat = "v3"
 
     /// Leads every snapshot file name: the snapshot format plus the engine's
-    /// state-file version (LLAMA_STATE_SEQ_VERSION), e.g. "v2s4".
+    /// state-file version (LLAMA_STATE_SEQ_VERSION), e.g. "v3s4".
     static func versionTag(stateVersion: Int) -> String {
         "\(snapshotFormat)s\(stateVersion)"
     }
