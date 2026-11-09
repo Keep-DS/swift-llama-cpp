@@ -12,7 +12,7 @@ name: Build llama.xcframework (iOS device + simulator + macOS)
 # iOS Simulator, so we still build the simulator slice ourselves.
 #
 # Toolchain: macos-26 runner, Xcode 26.4.1 (17E202), the same Xcode line
-# ggml-org uses for its own v0.7.0 xcframework. Its output links into apps
+# ggml-org uses for its own v0.7.0 and v0.8.0 xcframeworks. Its output links into apps
 # built with Xcode 27.
 #
 # After a run: put the printed SHA-256 into Package.swift `llamaChecksum`.
@@ -21,13 +21,13 @@ on:
   workflow_dispatch:
     inputs:
       llama_version:
-        description: 'llama.cpp build tag to build (e.g. b11669 = v0.7.0)'
+        description: 'llama.cpp build tag to build (e.g. b11960 = v0.8.0)'
         required: true
-        default: 'b11669'
+        default: 'b11960'
       llama_commit:
-        description: 'Full commit SHA that tag must point at (b11669 = 620d2225cc436ab0b001e3200e590e3b286ef9ab)'
+        description: 'Full commit SHA that tag must point at (b11960 = 8642541b255bfb5dc39cd351a178be09013a55d6)'
         required: true
-        default: '620d2225cc436ab0b001e3200e590e3b286ef9ab'
+        default: '8642541b255bfb5dc39cd351a178be09013a55d6'
       overwrite:
         description: 'Replace the assets of an existing release with this tag'
         type: boolean
